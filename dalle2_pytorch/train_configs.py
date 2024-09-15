@@ -1,14 +1,16 @@
 import json
 from torchvision import transforms as T
-from pydantic import BaseModel, validator, root_validator
+from pydantic import BaseModel, validator, model_validator
 from typing import List, Optional, Union, Tuple, Dict, Any, TypeVar
 
 from x_clip import CLIP as XCLIP
+from open_clip import list_pretrained
 from coca_pytorch import CoCa
 
 from dalle2_pytorch.dalle2_pytorch import (
     CoCaAdapter,
     OpenAIClipAdapter,
+    OpenClipAdapter,
     Unet,
     Decoder,
     DiffusionPrior,
@@ -36,12 +38,12 @@ class TrainSplitConfig(BaseModel):
     val: float = 0.15
     test: float = 0.1
 
-    @root_validator
-    def validate_all(cls, fields):
-        actual_sum = sum([*fields.values()])
+    @model_validator(mode = 'after')
+    def validate_all(self, m):
+        actual_sum = sum([*dict(self).values()])
         if actual_sum != 1.:
-            raise ValueError(f'{fields.keys()} must sum to 1.0. Found: {actual_sum}')
-        return fields
+            raise ValueError(f'{dict(self).keys()} must sum to 1.0. Found: {actual_sum}')
+        return self
 
 class TrackerLogConfig(BaseModel):
     log_type: str = 'console'
@@ -56,6 +58,7 @@ class TrackerLogConfig(BaseModel):
     def create(self, data_path: str):
         kwargs = self.dict()
         return create_logger(self.log_type, data_path, **kwargs)
+
 
 class TrackerLoadConfig(BaseModel):
     load_from: Optional[str] = None
@@ -87,7 +90,7 @@ class TrackerConfig(BaseModel):
     data_path: str = '.tracker_data'
     overwrite_data_path: bool = False
     log: TrackerLogConfig
-    load: Optional[TrackerLoadConfig]
+    load: Optional[TrackerLoadConfig] = None
     save: Union[List[TrackerSaveConfig], TrackerSaveConfig]
 
     def create(self, full_config: BaseModel, extra_config: dict, dummy_mode: bool = False) -> Tracker:
@@ -112,11 +115,15 @@ class TrackerConfig(BaseModel):
 class AdapterConfig(BaseModel):
     make: str = "openai"
     model: str = "ViT-L/14"
-    base_model_kwargs: Dict[str, Any] = None
+    base_model_kwargs: Optional[Dict[str, Any]] = None
 
     def create(self):
         if self.make == "openai":
             return OpenAIClipAdapter(self.model)
+        elif self.make == "open_clip":
+            pretrained = dict(list_pretrained())
+            checkpoint = pretrained[self.model]
+            return OpenClipAdapter(name=self.model, pretrained=checkpoint)
         elif self.make == "x-clip":
             return XClipAdapter(XCLIP(**self.base_model_kwargs))
         elif self.make == "coca":
@@ -127,8 +134,8 @@ class AdapterConfig(BaseModel):
 class DiffusionPriorNetworkConfig(BaseModel):
     dim: int
     depth: int
-    max_text_len: int = None
-    num_timesteps: int = None
+    max_text_len: Optional[int] = None
+    num_timesteps: Optional[int] = None
     num_time_embeds: int = 1
     num_image_embeds: int = 1
     num_text_embeds: int = 1
@@ -151,7 +158,7 @@ class DiffusionPriorNetworkConfig(BaseModel):
         return DiffusionPriorNetwork(**kwargs)
 
 class DiffusionPriorConfig(BaseModel):
-    clip: AdapterConfig = None
+    clip: Optional[AdapterConfig] = None
     net: DiffusionPriorNetworkConfig
     image_embed_dim: int
     image_size: int
@@ -188,7 +195,7 @@ class DiffusionPriorTrainConfig(BaseModel):
     use_ema: bool = True
     ema_beta: float = 0.99
     amp: bool = False
-    warmup_steps: int = None             # number of warmup steps
+    warmup_steps: Optional[int] = None   # number of warmup steps
     save_every_seconds: int = 3600       # how often to save
     eval_timesteps: List[int] = [64]     # which sampling timesteps to evaluate with
     best_validation_loss: float = 1e9    # the current best valudation loss observed
@@ -221,12 +228,12 @@ class TrainDiffusionPriorConfig(BaseModel):
 class UnetConfig(BaseModel):
     dim: int
     dim_mults: ListOrTuple[int]
-    image_embed_dim: int = None
-    text_embed_dim: int = None
-    cond_on_text_encodings: bool = None
-    cond_dim: int = None
+    image_embed_dim: Optional[int] = None
+    text_embed_dim: Optional[int] = None
+    cond_on_text_encodings: Optional[bool] = None
+    cond_dim: Optional[int] = None
     channels: int = 3
-    self_attn: ListOrTuple[int]
+    self_attn: SingularOrIterable[bool] = False
     attn_dim_head: int = 32
     attn_heads: int = 16
     init_cross_embed: bool = True
@@ -236,14 +243,14 @@ class UnetConfig(BaseModel):
 
 class DecoderConfig(BaseModel):
     unets: ListOrTuple[UnetConfig]
-    image_size: int = None
+    image_size: Optional[int] = None
     image_sizes: ListOrTuple[int] = None
-    clip: Optional[AdapterConfig]   # The clip model to use if embeddings are not provided
+    clip: Optional[AdapterConfig] = None   # The clip model to use if embeddings are not provided
     channels: int = 3
     timesteps: int = 1000
     sample_timesteps: Optional[SingularOrIterable[Optional[int]]] = None
     loss_type: str = 'l2'
-    beta_schedule: ListOrTuple[str] = None  # None means all cosine
+    beta_schedule: Optional[ListOrTuple[str]] = None  # None means all cosine
     learned_variance: SingularOrIterable[bool] = True
     image_cond_drop_prob: float = 0.1
     text_cond_drop_prob: float = 0.5
@@ -271,9 +278,9 @@ class DecoderConfig(BaseModel):
         extra = "allow"
 
 class DecoderDataConfig(BaseModel):
-    webdataset_base_url: str               # path to a webdataset with jpg images
-    img_embeddings_url: Optional[str]      # path to .npy files with embeddings
-    text_embeddings_url: Optional[str]     # path to .npy files with embeddings
+    webdataset_base_url: str                     # path to a webdataset with jpg images
+    img_embeddings_url: Optional[str] = None     # path to .npy files with embeddings
+    text_embeddings_url: Optional[str] = None    # path to .npy files with embeddings
     num_workers: int = 4
     batch_size: int = 64
     start_shard: int = 0
@@ -307,25 +314,26 @@ class DecoderTrainConfig(BaseModel):
     wd: SingularOrIterable[float] = 0.01
     warmup_steps: Optional[SingularOrIterable[int]] = None
     find_unused_parameters: bool = True
+    static_graph: bool = True
     max_grad_norm: SingularOrIterable[float] = 0.5
     save_every_n_samples: int = 100000
     n_sample_images: int = 6                       # The number of example images to produce when sampling the train and test dataset
     cond_scale: Union[float, List[float]] = 1.0
     device: str = 'cuda:0'
-    epoch_samples: int = None                      # Limits the number of samples per epoch. None means no limit. Required if resample_train is true as otherwise the number of samples per epoch is infinite.
-    validation_samples: int = None                 # Same as above but for validation.
+    epoch_samples: Optional[int] = None                      # Limits the number of samples per epoch. None means no limit. Required if resample_train is true as otherwise the number of samples per epoch is infinite.
+    validation_samples: Optional[int] = None                 # Same as above but for validation.
     save_immediately: bool = False
     use_ema: bool = True
     ema_beta: float = 0.999
     amp: bool = False
-    unet_training_mask: ListOrTuple[bool] = None   # If None, use all unets
+    unet_training_mask: Optional[ListOrTuple[bool]] = None   # If None, use all unets
 
 class DecoderEvaluateConfig(BaseModel):
     n_evaluation_samples: int = 1000
-    FID: Dict[str, Any] = None
-    IS: Dict[str, Any] = None
-    KID: Dict[str, Any] = None
-    LPIPS: Dict[str, Any] = None
+    FID: Optional[Dict[str, Any]] = None
+    IS: Optional[Dict[str, Any]] = None
+    KID: Optional[Dict[str, Any]] = None
+    LPIPS: Optional[Dict[str, Any]] = None
 
 class TrainDecoderConfig(BaseModel):
     decoder: DecoderConfig
@@ -339,11 +347,14 @@ class TrainDecoderConfig(BaseModel):
     def from_json_path(cls, json_path):
         with open(json_path) as f:
             config = json.load(f)
+            print(config)
         return cls(**config)
     
-    @root_validator
-    def check_has_embeddings(cls, values):
+    @model_validator(mode = 'after')
+    def check_has_embeddings(self, m):
         # Makes sure that enough information is provided to get the embeddings specified for training
+        values = dict(self)
+
         data_config, decoder_config = values.get('data'), values.get('decoder')
 
         if not exists(data_config) or not exists(decoder_config):
@@ -368,4 +379,4 @@ class TrainDecoderConfig(BaseModel):
         if text_emb_url:
             assert using_text_embeddings, "Text embeddings are being loaded, but text embeddings are not being conditioned on. This will slow down the dataloader for no reason."
 
-        return values
+        return m
